@@ -40,6 +40,10 @@ def analyze():
     text = data.get("text", "")
     result = analyze_tone(text)
     return jsonify(result)
+    
+@app.route('/')
+def home():
+    return "✅ Retone AI Lite backend is live!"
 
 if __name__ == "__main__":
     app.run(debug=True)
