@@ -89,7 +89,11 @@ def generate_rewrite_suggestions(text, context, scores):
             if response.status_code == 200:
                 result = response.json()
                 if isinstance(result, list) and len(result) > 0:
-                    generated_text = result[0].get("generated_text", "")
+                    if isinstance(result, list) and len(result) > 0 and "generated_text" in result[0]:
+                        generated_text = result[0]["generated_text"]
+                    else:
+                        generated_text = ""
+
                     
                     # Clean up the generated text
                     if generated_text.startswith(prompt):
