@@ -3,7 +3,3 @@ flask-cors
 gunicorn
 requests
 python-dotenv
-transformers
-torch
-accelerate
-sentencepiece

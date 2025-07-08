@@ -2,117 +2,111 @@ from flask import Flask, request, jsonify
 import requests
 from flask_cors import CORS
 import os
-import gc
-import torch
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+import json
 
 app = Flask(__name__)
 CORS(app)
 
 API_KEY = os.getenv("PERSPECTIVE_API_KEY")
-
-# Global variables for model management
-model = None
-tokenizer = None
-model_loaded = False
-
-def load_model():
-    """Load the lightweight T5 model only when needed"""
-    global model, tokenizer, model_loaded
-    
-    if not model_loaded:
-        try:
-            # Use a small, efficient model that fits in 512MB RAM
-            model_name = "google/flan-t5-small"  # ~80MB model
-            
-            print("Loading rewrite model...")
-            tokenizer = AutoTokenizer.from_pretrained(model_name)
-            model = AutoModelForSeq2SeqLM.from_pretrained(
-                model_name,
-                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-                device_map="auto" if torch.cuda.is_available() else None
-            )
-            
-            # Move to CPU to save memory
-            if not torch.cuda.is_available():
-                model = model.to('cpu')
-            
-            model_loaded = True
-            print("Model loaded successfully")
-            
-        except Exception as e:
-            print(f"Error loading model: {e}")
-            return False
-    
-    return True
-
-def unload_model():
-    """Unload model to free memory"""
-    global model, tokenizer, model_loaded
-    
-    if model_loaded:
-        del model
-        del tokenizer
-        model = None
-        tokenizer = None
-        model_loaded = False
-        
-        # Force garbage collection
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        
-        print("Model unloaded to free memory")
+HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")  # You'll need to add this
 
 def create_rewrite_prompt(text, context):
     """Create context-aware prompts for rewriting"""
     
     context_prompts = {
-        "chat": f"Rewrite this message to be more friendly and respectful for casual conversation: {text}",
-        "social": f"Rewrite this social media post to be more positive and engaging: {text}",
-        "email": f"Rewrite this text to be more professional and polite for business communication: {text}"
+        "chat": f"Rewrite this message to be more friendly and respectful for casual conversation: '{text}'",
+        "social": f"Rewrite this social media post to be more positive and engaging: '{text}'",
+        "email": f"Rewrite this text to be more professional and polite for business communication: '{text}'"
     }
     
     return context_prompts.get(context, context_prompts["chat"])
 
-def rewrite_text(text, context="chat"):
-    """Rewrite toxic text to be more respectful"""
+def rewrite_text_with_api(text, context="chat"):
+    """Rewrite text using Hugging Face Inference API (no local model needed)"""
     
-    if not load_model():
-        return {"error": "Model loading failed"}
+    if not HUGGINGFACE_API_KEY:
+        return {"error": "Hugging Face API key not configured"}
     
     try:
+        # Use Hugging Face Inference API - no model download needed!
+        api_url = "https://api-inference.huggingface.co/models/google/flan-t5-small"
+        headers = {"Authorization": f"Bearer {HUGGINGFACE_API_KEY}"}
+        
         # Create context-aware prompt
         prompt = create_rewrite_prompt(text, context)
         
-        # Tokenize and generate
-        inputs = tokenizer(prompt, return_tensors="pt", max_length=512, truncation=True)
+        payload = {
+            "inputs": prompt,
+            "parameters": {
+                "max_new_tokens": 100,
+                "temperature": 0.7,
+                "do_sample": True,
+                "return_full_text": False
+            }
+        }
         
-        # Generate rewrite with controlled parameters
-        with torch.no_grad():
-            outputs = model.generate(
-                inputs.input_ids,
-                max_length=150,
-                num_beams=2,  # Reduced beams to save memory
-                temperature=0.7,
-                do_sample=True,
-                pad_token_id=tokenizer.eos_token_id
-            )
+        response = requests.post(api_url, headers=headers, json=payload)
         
-        # Decode the result
-        rewritten = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        if response.status_code == 200:
+            result = response.json()
+            
+            # Handle different response formats
+            if isinstance(result, list) and len(result) > 0:
+                rewritten = result[0].get("generated_text", "").strip()
+            elif isinstance(result, dict):
+                rewritten = result.get("generated_text", "").strip()
+            else:
+                return {"error": "Unexpected API response format"}
+            
+            # Clean up the output
+            if rewritten:
+                return {"rewritten_text": rewritten}
+            else:
+                return {"error": "No rewrite generated"}
         
-        # Clean up the output
-        rewritten = rewritten.strip()
+        elif response.status_code == 503:
+            return {"error": "Model is loading, please try again in a moment"}
+        else:
+            return {"error": f"API request failed with status {response.status_code}"}
+            
+    except Exception as e:
+        return {"error": f"Rewrite failed: {str(e)}"}
+
+def rewrite_text_fallback(text, context="chat"):
+    """Fallback rewrite using simple rules (if API fails)"""
+    
+    try:
+        # Simple rule-based rewriting as backup
+        rules = {
+            "stupid": "misguided",
+            "idiot": "person",
+            "hate": "dislike",
+            "terrible": "concerning",
+            "awful": "problematic",
+            "worst": "challenging",
+            "sucks": "isn't ideal",
+            "crap": "poor quality",
+            "damn": "very",
+            "hell": "really"
+        }
         
-        # Unload model after use to free memory
-        unload_model()
+        rewritten = text.lower()
+        for bad_word, replacement in rules.items():
+            rewritten = rewritten.replace(bad_word, replacement)
+        
+        # Capitalize first letter
+        rewritten = rewritten.capitalize()
+        
+        # Add context-specific politeness
+        if context == "email":
+            rewritten = f"I respectfully think that {rewritten.lower()}"
+        elif context == "social":
+            rewritten = f"In my opinion, {rewritten.lower()}"
         
         return {"rewritten_text": rewritten}
         
     except Exception as e:
-        unload_model()  # Ensure model is unloaded on error
-        return {"error": f"Rewrite failed: {str(e)}"}
+        return {"error": f"Fallback rewrite failed: {str(e)}"}
 
 def analyze_tone(text, context="chat"):
     url = f"https://commentanalyzer.googleapis.com/v1alpha1/comments:analyze?key={API_KEY}"
@@ -187,7 +181,13 @@ def rewrite():
     if not text.strip():
         return jsonify({"error": "No text provided"})
     
-    result = rewrite_text(text, context)
+    # Try API first, fall back to simple rules
+    result = rewrite_text_with_api(text, context)
+    
+    if "error" in result:
+        print(f"API failed: {result['error']}, trying fallback...")
+        result = rewrite_text_fallback(text, context)
+    
     return jsonify(result)
 
 @app.route("/feedback", methods=["POST"])
