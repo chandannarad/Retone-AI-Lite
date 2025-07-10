@@ -55,7 +55,7 @@ def rewrite_text_fallback(text, context="chat"):
         else:
             if not rewritten.strip().endswith(('.', '!', '?')):
                 rewritten += "."
-            rewritten = f"I think {rewritten.strip()}"
+            rewritten = f"{rewritten.strip()}"
 
         rewritten = re.sub(r'\s+', ' ', rewritten).strip()
         if rewritten:
