@@ -31,7 +31,7 @@ def rewrite_text_with_api(text, context="chat"):
         return {"error": "Hugging Face API key not configured"}
     
     try:
-        api_url = "https://api-inference.huggingface.co/models/t5-base"
+        api_url = "https://api-inference.huggingface.co/models/Vamsi/T5_Paraphrase_Paws"
         headers = {"Authorization": f"Bearer {HUGGINGFACE_API_KEY}"}
         prompt = create_rewrite_prompt(text, context)
         
