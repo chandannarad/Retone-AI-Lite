@@ -107,7 +107,7 @@ def rewrite_text_fallback(text, context="chat"):
         elif context == "social":
             rewritten = f"Here's my take: {rewritten}."
         else:  # chat
-            rewritten = f"Hey, I think {rewritten}."
+            rewritten = f"Hey, I think:  {rewritten}."
         
         # Capitalize and clean up
         rewritten = ' '.join(rewritten.capitalize().split())
