@@ -9,60 +9,17 @@ import re
 app = Flask(__name__)
 CORS(app)
 
+# Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 API_KEY = os.getenv("PERSPECTIVE_API_KEY")
-HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
 
-def rewrite_text_with_api(text, context="chat"):
-    if not HUGGINGFACE_API_KEY:
-        logger.error("Hugging Face API key not configured")
-        return {"error": "Hugging Face API key not configured"}
-
-    models = [
-        "prithivida/parrot_paraphraser_on_T5",
-        "Vamsi/T5_Paraphrase_Paws"
-    ]
-
-    for model in models:
-        try:
-            api_url = f"https://api-inference.huggingface.co/models/{model}"
-            headers = {"Authorization": f"Bearer {HUGGINGFACE_API_KEY}"}
-            prompt = f"paraphrase: {text} </s>"
-
-            payload = {
-                "inputs": prompt,
-                "parameters": {
-                    "max_length": 100,
-                    "temperature": 0.7,
-                    "do_sample": True,
-                    "top_k": 120,
-                    "top_p": 0.95,
-                    "early_stopping": True,
-                    "num_return_sequences": 1
-                }
-            }
-
-            response = requests.post(api_url, headers=headers, json=payload, timeout=30)
-            logger.info(f"Trying model {model}: status {response.status_code}")
-
-            if response.status_code == 200:
-                result = response.json()
-                rewritten = result[0].get("generated_text", "").strip() if isinstance(result, list) and result else None
-                if rewritten and rewritten.lower() != text.lower():
-                    return {"rewritten_text": rewritten, "model_used": model}
-            elif response.status_code in [404, 503]:
-                continue
-        except Exception as e:
-            logger.error(f"Error with model {model}: {str(e)}")
-            continue
-
-    logger.warning("All Hugging Face models failed, using fallback")
-    return rewrite_text_fallback(text, context)
 
 def rewrite_text_fallback(text, context="chat"):
+    """Enhanced fallback rewrite using improved rules"""
     try:
+        # Comprehensive word replacement rules
         rules = {
             "fuck": "very", "fucking": "very", "shit": "stuff", "damn": "darn",
             "hell": "heck", "bitch": "person", "ass": "butt", "bastard": "person",
@@ -76,30 +33,43 @@ def rewrite_text_fallback(text, context="chat"):
             "disgusting": "unpleasant", "pathetic": "concerning", "worthless": "undervalued",
             "useless": "currently not helpful", "failure": "learning experience",
             "kill": "stop", "die": "go away", "destroy": "change", "attack": "address",
-            "hurt": "affect", "harm": "affect", "violence": "conflict", "weapon": "tool"
+            "hurt": "affect", "harm": "affect", "violence": "conflict", "weapon": "tool",
         }
 
         rewritten = text
+
+        # Apply word replacements (case-insensitive, whole words only)
         for bad_word, replacement in rules.items():
-            pattern = r'\\b' + re.escape(bad_word) + r'\\b'
+            pattern = r'\b' + re.escape(bad_word) + r'\b'
             rewritten = re.sub(pattern, replacement, rewritten, flags=re.IGNORECASE)
 
+        # Context-specific improvements
         if context == "email":
-            rewritten = f"I would like to express that {rewritten.strip().rstrip('.!?')}"
+            if not rewritten.strip().endswith(('.', '!', '?')):
+                rewritten += "."
+            rewritten = f"I would like to express that {rewritten.strip()}"
         elif context == "social":
-            rewritten = f"Here's my perspective: {rewritten.strip().rstrip('.!?')}"
+            if not rewritten.strip().endswith(('.', '!', '?')):
+                rewritten += "."
+            rewritten = f"Here's my perspective: {rewritten.strip()}"
         else:
-            rewritten = f"I think {rewritten.strip().rstrip('.!?')}"
+            if not rewritten.strip().endswith(('.', '!', '?')):
+                rewritten += "."
+            rewritten = f"I think {rewritten.strip()}"
 
-        rewritten = re.sub(r'\\s+', ' ', rewritten).strip()
+        rewritten = re.sub(r'\s+', ' ', rewritten).strip()
         if rewritten:
-            rewritten = rewritten[0].upper() + rewritten[1:]
+            rewritten = rewritten[0].upper() + rewritten[1:] if len(rewritten) > 1 else rewritten.upper()
 
-        return {"rewritten_text": rewritten, "model_used": "fallback"}
+        return {
+            "rewritten_text": rewritten,
+            "model_used": "Local Rewrite Engine"
+        }
 
     except Exception as e:
         logger.error(f"Fallback rewrite failed: {str(e)}")
         return {"error": f"Fallback rewrite failed: {str(e)}"}
+
 
 def analyze_tone(text, context="chat"):
     if not API_KEY:
@@ -126,14 +96,20 @@ def analyze_tone(text, context="chat"):
             logger.error(f"API failed or returned no scores: {result}")
             return {"error": "API failed or returned no scores."}
 
-        scores = {k: round(result["attributeScores"][k]["summaryScore"]["value"] * 100, 2)
-                  for k in data["requestedAttributes"]}
+        scores = {}
+        for attr in data["requestedAttributes"]:
+            scores[attr] = round(result["attributeScores"][attr]["summaryScore"]["value"] * 100, 2)
+
         scores["context"] = context
         return scores
 
+    except requests.exceptions.Timeout:
+        logger.error("Perspective API request timed out")
+        return {"error": "Request timed out"}
     except Exception as e:
         logger.error(f"Perspective API request failed: {str(e)}")
         return {"error": f"Request failed: {str(e)}"}
+
 
 def is_toxic(scores, context):
     thresholds = {
@@ -141,8 +117,13 @@ def is_toxic(scores, context):
         "social": {"toxicity": 35, "insult": 25, "threat": 15, "profanity": 25},
         "email": {"toxicity": 25, "insult": 20, "threat": 10, "profanity": 20}
     }
-    t = thresholds.get(context, thresholds["chat"])
-    return any(scores.get(attr, 0) >= t[attr.lower()] for attr in ["TOXICITY", "INSULT", "THREAT", "PROFANITY"])
+    threshold = thresholds.get(context, thresholds["chat"])
+
+    return (scores.get("TOXICITY", 0) >= threshold["toxicity"] or
+            scores.get("INSULT", 0) >= threshold["insult"] or
+            scores.get("THREAT", 0) >= threshold["threat"] or
+            scores.get("PROFANITY", 0) >= threshold["profanity"])
+
 
 @app.route("/analyze", methods=["POST"])
 def analyze():
@@ -150,11 +131,12 @@ def analyze():
     text = data.get("text", "")
     context = data.get("context", "chat")
     if not text.strip():
-        return jsonify({"error": "No text provided"}), 400
+        return jsonify({"error": "No text provided"})
     result = analyze_tone(text, context)
     if "error" not in result:
         result["is_toxic"] = is_toxic(result, context)
     return jsonify(result)
+
 
 @app.route("/rewrite", methods=["POST"])
 def rewrite():
@@ -162,22 +144,32 @@ def rewrite():
     text = data.get("text", "")
     context = data.get("context", "chat")
     if not text.strip():
-        return jsonify({"error": "No text provided"}), 400
-    result = rewrite_text_with_api(text, context)
-    if "error" in result:
-        logger.info(f"API failed: {result['error']}, trying fallback...")
-        result = rewrite_text_fallback(text, context)
+        return jsonify({"error": "No text provided"})
+    result = rewrite_text_fallback(text, context)
     return jsonify(result)
+
 
 @app.route("/feedback", methods=["POST"])
 def feedback():
     data = request.get_json()
-    logger.info(f"Feedback received: {data}")
+    original_text = data.get("original_text", "")
+    rewritten_text = data.get("rewritten_text", "")
+    rating = data.get("rating", "")
+    context = data.get("context", "chat")
+    feedback_log = {
+        "original": original_text,
+        "rewritten": rewritten_text,
+        "rating": rating,
+        "context": context
+    }
+    logger.info(f"Feedback received: {feedback_log}")
     return jsonify({"status": "Feedback recorded", "message": "Thank you for your feedback!"})
+
 
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({"message": "Retone AI Lite Backend is running!"})
+
 
 if __name__ == "__main__":
     app.run(debug=True, host="0.0.0.0", port=5000)
